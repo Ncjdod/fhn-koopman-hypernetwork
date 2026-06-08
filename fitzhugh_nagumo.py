@@ -1,5 +1,5 @@
 """
-FitzHugh-Nagumo neural simulation and DMD/DMDc analysis entrypoint.
+FitzHugh-Nagumo neural simulation entrypoint.
 """
 
 import os
@@ -9,12 +9,12 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from dynamics import get_external_current, run_hankel_dmd, run_dmdc
+from dynamics import get_external_current
 from simulation import simulate_fhn, simulate_fhn_batch, fit_fhn_parameters
-from plotting import plot_results, plot_dmd_results, plot_dmdc_results
+from plotting import plot_results
 
 def main():
-    """Main orchestration entrypoint for FHN simulation, parameter fitting, and DMD/DMDc."""
+    """Main orchestration entrypoint for FHN simulation and parameter fitting."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(script_dir, 'data')
     plots_dir = os.path.join(script_dir, 'plots')
@@ -34,12 +34,6 @@ def main():
     
     parser.add_argument('--batch', action='store_true', help="Run in multi-trajectory batch mode using JAX vmap")
     parser.add_argument('--batch-size', type=int, default=5, help="Number of trajectories in the batch (default: 5)")
-    
-    parser.add_argument('--dmd', action='store_true', help="Run Hankel Dynamic Mode Decomposition (Hankel-DMD)")
-    parser.add_argument('--dmdc', action='store_true', help="Run Dynamic Mode Decomposition with Control (DMDc)")
-    parser.add_argument('--dmd-H', type=int, default=70, help="Delay embedding dimension H for Hankel matrix (default: 70)")
-    parser.add_argument('--dmd-r', type=int, default=12, help="Truncation rank r for state projection subspace (default: 12)")
-    parser.add_argument('--dmd-p', type=int, default=20, help="Truncation rank p for DMDc augmented state-control matrix (default: 20)")
     
     parser.add_argument('--t-max', type=float, default=100.0, help="Total simulation time (default: 100.0)")
     parser.add_argument('--dt', type=float, default=0.1, help="Sampling time step (default: 0.1)")
@@ -150,78 +144,6 @@ def main():
             except Exception as e:
                 print(f"Error saving CSV: {e}")
             
-    if args.dmd:
-        print(f"\nRunning Hankel-DMD Analysis on potential v...")
-        print(f"Hankel Matrix parameters: H={args.dmd_H}, Truncation Rank r={args.dmd_r}")
-        
-        try:
-            A_matrix, dmd_eigenvalues, s_vals, dmd_X, dmd_Y = run_hankel_dmd(
-                ys_single[:, 0], H=args.dmd_H, r=args.dmd_r
-            )
-            
-            print("Hankel-DMD Complete!")
-            print(f"Shifted Hankel X shape: {dmd_X.shape}")
-            print(f"Shifted Hankel Y shape: {dmd_Y.shape}")
-            print(f"Truncated Dynamic Matrix A shape: {A_matrix.shape}")
-            print(f"Top 5 Singular Values: {s_vals[:5]}")
-            print(f"Koopman Eigenvalues (first 5):\n{dmd_eigenvalues[:5]}")
-            
-            if args.output:
-                dmd_output_path = args.output.replace(".csv", "_dmd_A.csv")
-                np.savetxt(dmd_output_path, A_matrix, delimiter=",")
-                print(f"Saved truncated transition matrix A to {dmd_output_path}")
-                
-            if not args.no_plot or args.save_plot:
-                print("Generating DMD matplotlib spectrum plots...")
-                plot_dmd_results(
-                    s_vals, dmd_eigenvalues, r=args.dmd_r, H=args.dmd_H,
-                    save_path=args.save_plot, show_plot=not args.no_plot
-                )
-        except Exception as e:
-            print(f"Error running DMD: {e}")
-
-    if args.dmdc:
-        print(f"\nRunning Bilinear Dynamic Mode Decomposition with Control (Bilinear DMDc)...")
-        print(f"Hankel parameters: H={args.dmd_H} | Truncation Ranks: state r={args.dmd_r}, augmented p={args.dmd_p}")
-        
-        try:
-            if args.batch:
-                A_tilde, B_tilde, C_tilde, dmdc_eigenvalues, s_x, s_p, dmdc_X, dmdc_Y, dmdc_U, dmdc_Ur = run_dmdc(
-                    ys[:, :, 0], u_data_batch, H=args.dmd_H, r=args.dmd_r, p=args.dmd_p
-                )
-            else:
-                A_tilde, B_tilde, C_tilde, dmdc_eigenvalues, s_x, s_p, dmdc_X, dmdc_Y, dmdc_U, dmdc_Ur = run_dmdc(
-                    ys_single[:, 0], u_data, H=args.dmd_H, r=args.dmd_r, p=args.dmd_p
-                )
-            
-            print("Bilinear DMDc Complete!")
-            print(f"Augmented state-input matrix Omega shape: ({dmdc_X.shape[0] * 2 + dmdc_U.shape[0]}, {dmdc_X.shape[1]})")
-            print(f"Autonomous transition A_tilde shape: {A_tilde.shape}")
-            print(f"Control coupling B_tilde shape: {B_tilde.shape}")
-            print(f"Bilinear coupling C_tilde shape: {C_tilde.shape}")
-            print(f"Top 5 Intrinsic Singular Values: {s_x[:5]}")
-            print(f"Intrinsic Koopman Eigenvalues (first 5):\n{dmdc_eigenvalues[:5]}")
-            
-            if args.output:
-                dmdc_A_path = args.output.replace(".csv", "_dmdc_A.csv")
-                dmdc_B_path = args.output.replace(".csv", "_dmdc_B.csv")
-                dmdc_C_path = args.output.replace(".csv", "_dmdc_C.csv")
-                np.savetxt(dmdc_A_path, A_tilde, delimiter=",")
-                np.savetxt(dmdc_B_path, B_tilde, delimiter=",")
-                np.savetxt(dmdc_C_path, C_tilde, delimiter=",")
-                print(f"Saved autonomous operator A_tilde to {dmdc_A_path}")
-                print(f"Saved control operator B_tilde to {dmdc_B_path}")
-                print(f"Saved bilinear operator C_tilde to {dmdc_C_path}")
-                
-            if not args.no_plot or args.save_plot:
-                print("Generating Bilinear DMDc matplotlib spectra and control plots...")
-                plot_dmdc_results(
-                    s_x, s_p, dmdc_eigenvalues, B_tilde, C_tilde, r=args.dmd_r, H=args.dmd_H, p=args.dmd_p,
-                    save_path=args.save_plot, show_plot=not args.no_plot
-                )
-        except Exception as e:
-            print(f"Error running DMDc: {e}")
-
     if not args.no_plot or args.save_plot:
         print("\nGenerating matplotlib visualization...")
         plot_results(

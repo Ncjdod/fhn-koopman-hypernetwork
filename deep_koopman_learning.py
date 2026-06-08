@@ -12,7 +12,7 @@ import optax
 import matplotlib.pyplot as plt
 from functools import partial
 
-from dynamics import run_dmdc, get_external_current
+from dynamics import get_external_current
 from simulation import simulate_fhn, simulate_fhn_batch
 from phase_space_analyzer import run_analysis
 
@@ -30,11 +30,11 @@ def init_mlp_params(layers, key):
     return params
 
 def forward_mlp(x, params):
-    """Computes the forward pass of a simple MLP with ReLU activations."""
+    """Computes the forward pass of a simple MLP with Swish activations."""
     activation = x
     for i in range(len(params) - 1):
         layer = params[i]
-        activation = jax.nn.relu(jnp.dot(activation, layer["w"]) + layer["b"])
+        activation = jax.nn.swish(jnp.dot(activation, layer["w"]) + layer["b"])
     layer = params[-1]
     return jnp.dot(activation, layer["w"]) + layer["b"]
 
@@ -208,7 +208,7 @@ def main():
     parser.add_argument('--n-predict', type=int, default=100)
     parser.add_argument('--no-plot', action='store_true')
     parser.add_argument('--require-state', type=str, default=None)
-    parser.add_argument('--loss-power', type=int, default=2)
+    parser.add_argument('--loss-power', type=int, default=6)
     args = parser.parse_args()
     
     print("Performing initial phase space analysis check...")
@@ -234,10 +234,10 @@ def main():
     
     weights = (1.0, 1.0, 1.0)
     
-    def total_loss_fn(params_dict, trajectories, current_profiles, loss_power):
+    def total_loss_fn(params_dict, trajectories, current_profiles):
         trajectory_dots = compute_fhn_derivatives(trajectories, current_profiles)
         l_rec, l_lin, l_pred = compute_losses(
-            params_dict, trajectories, trajectory_dots, current_profiles, args.latent_m, args.n_predict, args.dt, loss_power
+            params_dict, trajectories, trajectory_dots, current_profiles, args.latent_m, args.n_predict, args.dt, args.loss_power
         )
         return weights[0] * l_rec + weights[1] * l_lin + weights[2] * l_pred
         
@@ -252,29 +252,22 @@ def main():
     )
     opt_state = optimizer.init(params)
     
-    @partial(jax.jit, static_argnums=(4,))
-    def train_step(p_vars, state, trajectories, current_profiles, loss_power):
-        loss, grads = jax.value_and_grad(total_loss_fn)(p_vars, trajectories, current_profiles, loss_power)
+    @jax.jit
+    def train_step(p_vars, state, trajectories, current_profiles):
+        loss, grads = jax.value_and_grad(total_loss_fn)(p_vars, trajectories, current_profiles)
         updates, state = optimizer.update(grads, state, p_vars)
         p_vars = optax.apply_updates(p_vars, updates)
         return p_vars, state, loss
         
     print(f"Starting Deep Koopman Sobolev training ({args.steps} epochs)...")
     for step in range(args.steps):
-        if step < 1000:
-            current_power = 2
-        elif step < 3000:
-            current_power = 4
-        else:
-            current_power = 6
-            
-        params, opt_state, loss_val = train_step(params, opt_state, ys, u_data_batch, current_power)
-        if step % (args.steps // 10) == 0 or step == args.steps - 1:
+        params, opt_state, loss_val = train_step(params, opt_state, ys, u_data_batch)
+        if step % max(1, args.steps // 10) == 0 or step == args.steps - 1:
             trajectory_dots = compute_fhn_derivatives(ys, u_data_batch)
             l_rec, l_lin, l_pred = compute_losses(
-                params, ys, trajectory_dots, u_data_batch, args.latent_m, args.n_predict, args.dt, current_power
+                params, ys, trajectory_dots, u_data_batch, args.latent_m, args.n_predict, args.dt, args.loss_power
             )
-            print(f"Epoch {step:03d} [L{current_power}] | Total Loss: {float(loss_val):.6f} | Recon: {float(l_rec):.6f} | Lin: {float(l_lin):.6f} | Pred: {float(l_pred):.6f}")
+            print(f"Epoch {step:03d} | Total Loss: {float(loss_val):.6f} | Recon: {float(l_rec):.6f} | Lin: {float(l_lin):.6f} | Pred: {float(l_pred):.6f}")
             
     print("\nTraining completed successfully! Running validation on unseen dynamic chirp current...")
     y0_val = jnp.array([-1.5, -0.5])
