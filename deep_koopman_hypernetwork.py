@@ -178,9 +178,9 @@ def compute_losses(params_dict, trajectories, trajectory_dots, current_profiles,
 def init_deep_koopman_params(m, key):
     """Initializes all learnable parameters for the deep Koopman model including the hypernetwork."""
     key1, key2, key3 = jax.random.split(key, 3)
-    params_enc = init_mlp_params([2, 32, 32, 2 * m], key1)
-    params_dec = init_mlp_params([2 * m, 32, 32, 2], key2)
-    params_hyper = init_mlp_params([1, 16, 16, 2 * m], key3)
+    params_enc = init_mlp_params([2, 96, 96, 2 * m], key1)
+    params_dec = init_mlp_params([2 * m, 96, 96, 2], key2)
+    params_hyper = init_mlp_params([1, 96, 96, 2 * m], key3)
     
     b = np.zeros((2 * m,))
     b[:m] = -0.1
@@ -201,7 +201,7 @@ def main():
     
     parser = argparse.ArgumentParser(description="Deep Koopman Learning")
     parser.add_argument('--batch-size', type=int, default=8)
-    parser.add_argument('--latent-m', type=int, default=3)
+    parser.add_argument('--latent-m', type=int, default=8)
     parser.add_argument('--t-max', type=float, default=10.0)
     parser.add_argument('--dt', type=float, default=0.01)
     parser.add_argument('--lr', type=float, default=3e-4)
@@ -233,21 +233,21 @@ def main():
     init_key = jax.random.PRNGKey(42)
     params = init_deep_koopman_params(args.latent_m, init_key)
     
-    def get_loss_weights(step):
-        if step < 1000:
-            return jnp.array([0.0, 2.0, 0.0])
-        elif step < 3000:
-            alpha = (step - 1000) / 2000.0
-            return jnp.array([alpha, 2.0 - alpha, alpha])
-        else:
-            return jnp.array([1.0, 1.0, 1.0])
+    def get_loss_weights_jax(step):
+        step_f = jnp.float32(step)
+        alpha = (step_f - 1000.0) / 2000.0
+        w_rec = jnp.where(step_f < 1000.0, 0.0, jnp.where(step_f < 3000.0, alpha, 1.0))
+        w_lin = jnp.where(step_f < 1000.0, 2.0, jnp.where(step_f < 3000.0, 2.0 - alpha, 1.0))
+        w_pred = jnp.where(step_f < 1000.0, 0.0, jnp.where(step_f < 3000.0, alpha, 1.0))
+        return jnp.stack([w_rec, w_lin, w_pred])
             
     def total_loss_fn(params_dict, trajectories, current_profiles, weights):
         trajectory_dots = compute_fhn_derivatives(trajectories, current_profiles)
         l_rec, l_lin, l_pred = compute_losses(
             params_dict, trajectories, trajectory_dots, current_profiles, args.latent_m, args.n_predict, args.dt, args.loss_power
         )
-        return weights[0] * l_rec + weights[1] * l_lin + weights[2] * l_pred
+        total_loss = weights[0] * l_rec + weights[1] * l_lin + weights[2] * l_pred
+        return total_loss, (l_rec, l_lin, l_pred)
         
     lr_schedule = optax.cosine_decay_schedule(
         init_value=args.lr,
@@ -260,23 +260,39 @@ def main():
     )
     opt_state = optimizer.init(params)
     
-    @jax.jit
-    def train_step(p_vars, state, trajectories, current_profiles, weights):
-        loss, grads = jax.value_and_grad(total_loss_fn)(p_vars, trajectories, current_profiles, weights)
+    def scan_body(carry, step):
+        p_vars, state = carry
+        w_step = get_loss_weights_jax(step)
+        (loss, aux), grads = jax.value_and_grad(total_loss_fn, has_aux=True)(p_vars, ys, u_data_batch, w_step)
         updates, state = optimizer.update(grads, state, p_vars)
         p_vars = optax.apply_updates(p_vars, updates)
-        return p_vars, state, loss
         
-    print(f"Starting Deep Koopman Sobolev training ({args.steps} epochs)...")
-    for step in range(args.steps):
-        w_step = get_loss_weights(step)
-        params, opt_state, loss_val = train_step(params, opt_state, ys, u_data_batch, w_step)
-        if step % max(1, args.steps // 10) == 0 or step == args.steps - 1:
-            trajectory_dots = compute_fhn_derivatives(ys, u_data_batch)
-            l_rec, l_lin, l_pred = compute_losses(
-                params, ys, trajectory_dots, u_data_batch, args.latent_m, args.n_predict, args.dt, args.loss_power
+        l_rec, l_lin, l_pred = aux
+        print_interval = max(1, args.steps // 10)
+        
+        def print_cond(arg):
+            step_val, loss_val, rec_val, lin_val, pred_val = arg
+            jax.debug.print(
+                "Epoch {step:03d} | Total Loss: {loss:.6f} | Recon: {recon:.6f} | Lin: {lin:.6f} | Pred: {pred:.6f}",
+                step=step_val,
+                loss=loss_val,
+                recon=rec_val,
+                lin=lin_val,
+                pred=pred_val
             )
-            print(f"Epoch {step:03d} | Total Loss: {float(loss_val):.6f} | Recon: {float(l_rec):.6f} | Lin: {float(l_lin):.6f} | Pred: {float(l_pred):.6f}")
+            
+        jax.lax.cond(
+            (step % print_interval == 0) | (step == args.steps - 1),
+            print_cond,
+            lambda arg: None,
+            (step, loss, l_rec, l_lin, l_pred)
+        )
+        
+        return (p_vars, state), loss
+        
+    print(f"Starting Deep Koopman Sobolev training ({args.steps} epochs on GPU)...")
+    steps_arr = jnp.arange(args.steps)
+    (params, opt_state), _ = jax.lax.scan(scan_body, (params, opt_state), steps_arr)
             
     print("\nTraining completed successfully! Running validation on unseen dynamic chirp current...")
     y0_val = jnp.array([-1.5, -0.5])

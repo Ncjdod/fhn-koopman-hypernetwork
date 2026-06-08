@@ -5,31 +5,28 @@ import diffrax
 import optax
 from dynamics import fhn_vector_field
 
-def simulate_fhn(y0, t_span, a=0.7, b=0.8, tau=12.5, I_type='constant', I_val=0.5, rtol=1e-6, atol=1e-6):
-    """Simulates the FHN model using the Diffrax Tsit5 adaptive solver."""
+def simulate_fhn(y0, t_span, a=0.7, b=0.8, tau=12.5, I_type='constant', I_val=0.5):
+    """Simulates the FHN model using the Diffrax Dopri5 (RK5) fixed-step solver."""
     term = diffrax.ODETerm(fhn_vector_field)
-    solver = diffrax.Tsit5()
+    solver = diffrax.Dopri5()
     saveat = diffrax.SaveAt(ts=t_span)
-    stepsize_controller = diffrax.PIDController(rtol=rtol, atol=atol)
     
     sol = diffrax.diffeqsolve(
         term,
         solver,
         t0=t_span[0],
         t1=t_span[-1],
-        dt0=0.05,
+        dt0=t_span[1] - t_span[0],
         y0=jnp.asarray(y0, dtype=jnp.float32),
         args=(a, b, tau, I_type, I_val),
-        saveat=saveat,
-        stepsize_controller=stepsize_controller,
-        max_steps=10000
+        saveat=saveat
     )
     return sol.ys
 
-def simulate_fhn_batch(y0_batch, t_span, I_type, I_val_batch, a=0.7, b=0.8, tau=12.5, rtol=1e-6, atol=1e-6):
+def simulate_fhn_batch(y0_batch, t_span, I_type, I_val_batch, a=0.7, b=0.8, tau=12.5):
     """Simulates a batch of FHN trajectories in parallel using jax.vmap."""
     vmapped_solve = jax.vmap(
-        lambda y0, I_val: simulate_fhn(y0, t_span, a, b, tau, I_type, I_val, rtol, atol),
+        lambda y0, I_val: simulate_fhn(y0, t_span, a, b, tau, I_type, I_val),
         in_axes=(0, 0)
     )
     return vmapped_solve(y0_batch, I_val_batch)
@@ -47,22 +44,18 @@ def fit_fhn_parameters(y0, t_span, noisy_target, I_type, I_val, lr=0.02, steps=1
     def loss_fn(params, y0, t_span, target, I_type, I_val):
         a, b, tau = jnp.abs(params)
         term = diffrax.ODETerm(fhn_vector_field)
-        solver = diffrax.Tsit5()
+        solver = diffrax.Dopri5()
         saveat = diffrax.SaveAt(ts=t_span)
-        stepsize_controller = diffrax.PIDController(rtol=1e-4, atol=1e-4)
         
         sol = diffrax.diffeqsolve(
             term,
             solver,
             t0=t_span[0],
             t1=t_span[-1],
-            dt0=0.1,
+            dt0=t_span[1] - t_span[0],
             y0=y0,
             args=(a, b, tau, I_type, I_val),
-            saveat=saveat,
-            stepsize_controller=stepsize_controller,
-            adjoint=diffrax.RecursiveCheckpointAdjoint(),
-            max_steps=5000
+            saveat=saveat
         )
         return jnp.mean((sol.ys - target) ** 2)
 
