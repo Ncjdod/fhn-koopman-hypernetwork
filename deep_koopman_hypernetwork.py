@@ -233,9 +233,16 @@ def main():
     init_key = jax.random.PRNGKey(42)
     params = init_deep_koopman_params(args.latent_m, init_key)
     
-    weights = (1.0, 1.0, 1.0)
-    
-    def total_loss_fn(params_dict, trajectories, current_profiles):
+    def get_loss_weights(step):
+        if step < 1000:
+            return jnp.array([0.0, 2.0, 0.0])
+        elif step < 3000:
+            alpha = (step - 1000) / 2000.0
+            return jnp.array([alpha, 2.0 - alpha, alpha])
+        else:
+            return jnp.array([1.0, 1.0, 1.0])
+            
+    def total_loss_fn(params_dict, trajectories, current_profiles, weights):
         trajectory_dots = compute_fhn_derivatives(trajectories, current_profiles)
         l_rec, l_lin, l_pred = compute_losses(
             params_dict, trajectories, trajectory_dots, current_profiles, args.latent_m, args.n_predict, args.dt, args.loss_power
@@ -254,15 +261,16 @@ def main():
     opt_state = optimizer.init(params)
     
     @jax.jit
-    def train_step(p_vars, state, trajectories, current_profiles):
-        loss, grads = jax.value_and_grad(total_loss_fn)(p_vars, trajectories, current_profiles)
+    def train_step(p_vars, state, trajectories, current_profiles, weights):
+        loss, grads = jax.value_and_grad(total_loss_fn)(p_vars, trajectories, current_profiles, weights)
         updates, state = optimizer.update(grads, state, p_vars)
         p_vars = optax.apply_updates(p_vars, updates)
         return p_vars, state, loss
         
     print(f"Starting Deep Koopman Sobolev training ({args.steps} epochs)...")
     for step in range(args.steps):
-        params, opt_state, loss_val = train_step(params, opt_state, ys, u_data_batch)
+        w_step = get_loss_weights(step)
+        params, opt_state, loss_val = train_step(params, opt_state, ys, u_data_batch, w_step)
         if step % max(1, args.steps // 10) == 0 or step == args.steps - 1:
             trajectory_dots = compute_fhn_derivatives(ys, u_data_batch)
             l_rec, l_lin, l_pred = compute_losses(
