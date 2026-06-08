@@ -3,6 +3,7 @@ FitzHugh-Nagumo neural simulation entrypoint.
 """
 
 import os
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 import argparse
 import csv
 import numpy as np

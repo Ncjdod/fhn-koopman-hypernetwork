@@ -3,6 +3,7 @@ Deep Koopman Learning with Sobolev training and Hypernetwork for Global Dynamics
 """
 
 import os
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 import sys
 import argparse
 import numpy as np
@@ -200,7 +201,7 @@ def main():
     os.makedirs(plots_dir, exist_ok=True)
     
     parser = argparse.ArgumentParser(description="Deep Koopman Learning")
-    parser.add_argument('--batch-size', type=int, default=8)
+    parser.add_argument('--batch-size', type=int, default=250)
     parser.add_argument('--latent-m', type=int, default=8)
     parser.add_argument('--t-max', type=float, default=10.0)
     parser.add_argument('--dt', type=float, default=0.01)
@@ -218,16 +219,27 @@ def main():
     n_steps = int(args.t_max / args.dt) + 1
     t_span = jnp.linspace(0.0, args.t_max, n_steps)
     
-    key = jax.random.PRNGKey(101)
-    key1, key2, key3 = jax.random.split(key, 3)
-    v0s = jax.random.uniform(key1, (args.batch_size,), minval=-2.0, maxval=1.0)
-    w0s = jax.random.uniform(key2, (args.batch_size,), minval=-1.0, maxval=0.5)
-    y0_batch = jnp.stack([v0s, w0s], axis=1)
-    I_val_batch = jax.random.uniform(key3, (args.batch_size,), minval=0.2, maxval=1.2)
+    data_dir = os.path.join(script_dir, 'data')
+    os.makedirs(data_dir, exist_ok=True)
+    data_file = os.path.join(data_dir, 'fhn_training_data_250.npz')
     
-    print(f"Simulating {args.batch_size} training trajectories...")
-    ys = simulate_fhn_batch(y0_batch, t_span, 'sine', I_val_batch)
-    u_data_batch = jax.vmap(lambda iv: get_external_current(t_span, 'sine', iv))(I_val_batch)
+    if os.path.exists(data_file):
+        print("Loading pre-simulated FitzHugh-Nagumo dataset...")
+        loaded_data = np.load(data_file)
+        ys = jnp.array(loaded_data['ys'])
+        u_data_batch = jnp.array(loaded_data['u_data_batch'])
+    else:
+        print(f"Simulating {args.batch_size} training trajectories...")
+        key = jax.random.PRNGKey(101)
+        key1, key2, key3 = jax.random.split(key, 3)
+        v0s = jax.random.uniform(key1, (args.batch_size,), minval=-2.0, maxval=1.0)
+        w0s = jax.random.uniform(key2, (args.batch_size,), minval=-1.0, maxval=0.5)
+        y0_batch = jnp.stack([v0s, w0s], axis=1)
+        I_val_batch = jax.random.uniform(key3, (args.batch_size,), minval=0.2, maxval=1.2)
+        ys = simulate_fhn_batch(y0_batch, t_span, 'sine', I_val_batch)
+        u_data_batch = jax.vmap(lambda iv: get_external_current(t_span, 'sine', iv))(I_val_batch)
+        np.savez(data_file, ys=np.array(ys), u_data_batch=np.array(u_data_batch))
+        print(f"Saved dataset to {data_file}")
     
     print("Initializing Deep Koopman network parameters...")
     init_key = jax.random.PRNGKey(42)
@@ -263,11 +275,27 @@ def main():
     def scan_body(carry, step):
         p_vars, state = carry
         w_step = get_loss_weights_jax(step)
-        (loss, aux), grads = jax.value_and_grad(total_loss_fn, has_aux=True)(p_vars, ys, u_data_batch, w_step)
-        updates, state = optimizer.update(grads, state, p_vars)
-        p_vars = optax.apply_updates(p_vars, updates)
         
-        l_rec, l_lin, l_pred = aux
+        def batch_step(batch_carry, batch_idx):
+            p_vars_inner, state_inner = batch_carry
+            start_idx = batch_idx * 25
+            ys_batch = jax.lax.dynamic_slice(ys, (start_idx, 0, 0), (25, ys.shape[1], ys.shape[2]))
+            u_batch = jax.lax.dynamic_slice(u_data_batch, (start_idx, 0), (25, u_data_batch.shape[1]))
+            
+            (loss, aux), grads = jax.value_and_grad(total_loss_fn, has_aux=True)(p_vars_inner, ys_batch, u_batch, w_step)
+            updates, state_inner = optimizer.update(grads, state_inner, p_vars_inner)
+            p_vars_inner = optax.apply_updates(p_vars_inner, updates)
+            
+            return (p_vars_inner, state_inner), (loss, aux)
+            
+        batch_indices = jnp.arange(10)
+        (p_vars, state), batch_outputs = jax.lax.scan(batch_step, (p_vars, state), batch_indices)
+        
+        loss_epoch = jnp.mean(batch_outputs[0])
+        l_rec_epoch = jnp.mean(batch_outputs[1][0])
+        l_lin_epoch = jnp.mean(batch_outputs[1][1])
+        l_pred_epoch = jnp.mean(batch_outputs[1][2])
+        
         print_interval = max(1, args.steps // 10)
         
         def print_cond(arg):
@@ -285,10 +313,10 @@ def main():
             (step % print_interval == 0) | (step == args.steps - 1),
             print_cond,
             lambda arg: None,
-            (step, loss, l_rec, l_lin, l_pred)
+            (step, loss_epoch, l_rec_epoch, l_lin_epoch, l_pred_epoch)
         )
         
-        return (p_vars, state), loss
+        return (p_vars, state), loss_epoch
         
     print(f"Starting Deep Koopman Sobolev training ({args.steps} epochs on GPU)...")
     steps_arr = jnp.arange(args.steps)
