@@ -56,3 +56,7 @@ figures/
 *.png
 *.pdf
 *.nwb
+
+# Article figures (keep with ARTICLE.md)
+!plots/
+!plots/diag_*.png

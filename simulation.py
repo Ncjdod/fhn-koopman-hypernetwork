@@ -6,6 +6,32 @@ import jax.numpy as jnp
 import optax
 from dynamics import fhn_vector_field
 
+
+def simulate_fhn_diffrax(y0, t_span, a=0.7, b=0.8, tau=12.5,
+                         I_type='constant', I_val=0.5, rtol=1e-8, atol=1e-10):
+    """High-accuracy reference integration with diffrax (adaptive Dopri5).
+
+    Used for the limit-cycle reference and Floquet diagnostics where the fixed
+    RK4 grid used for bulk training data is not accurate enough.  Wires in the
+    previously-unused ``diffrax`` dependency (fix #6).
+    """
+    import diffrax
+
+    y0 = jnp.asarray(y0, dtype=jnp.float64 if jax.config.read("jax_enable_x64") else jnp.float32)
+    args = (a, b, tau, I_type, I_val)
+    term = diffrax.ODETerm(lambda t, y, _: fhn_vector_field(t, y, args))
+    sol = diffrax.diffeqsolve(
+        term, diffrax.Dopri5(),
+        t0=float(t_span[0]), t1=float(t_span[-1]),
+        dt0=float(t_span[1] - t_span[0]),
+        y0=y0,
+        saveat=diffrax.SaveAt(ts=t_span),
+        stepsize_controller=diffrax.PIDController(rtol=rtol, atol=atol),
+        max_steps=2_000_000,
+    )
+    return sol.ys
+
+
 def simulate_fhn(y0, t_span, a=0.7, b=0.8, tau=12.5, I_type='constant', I_val=0.5):
     y0 = jnp.asarray(y0, dtype=jnp.float32)
     dt = t_span[1] - t_span[0]
