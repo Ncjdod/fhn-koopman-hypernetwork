@@ -7,7 +7,7 @@ def get_external_current(t, I_type, I_val):
     sine_current = I_val * (1.0 + 0.5 * jnp.sin(0.2 * t))
     pulse_current = jnp.where(jnp.mod(t, 20.0) <= 5.0, I_val, 0.0)
     chirp_current = I_val * (1.0 + 0.5 * jnp.sin(0.05 * t + 0.001 * t**2))
-    
+
     if I_type == 'step':
         return step_current
     elif I_type == 'sine':
@@ -27,5 +27,3 @@ def fhn_vector_field(t, y, args):
     dv_dt = v - (v**3) / 3.0 - w + I_ext
     dw_dt = (v + a - b * w) / tau
     return jnp.stack([dv_dt, dw_dt])
-
-

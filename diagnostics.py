@@ -1,18 +1,4 @@
-"""
-Spectral & dynamical diagnostics for the trained FHN Koopman models.
-
-Produces the figures and tables requested for the article:
-
-  D0  learned spectrum  sigma(u), omega(u)  vs the Jacobian eigenvalues mu_pm(u)
-      and the measured limit-cycle frequency                        (fix #9)
-  D1  eigenvalue trajectories over the latent radius r              (a)
-  D2  Floquet multipliers of the recovered cycle vs ground truth    (b)
-  D3  Koopman-mode reconstruction quality (per-mode decomposition)  (c)
-  D4  long-horizon rollout error decomposed by spectral band        (d)
-  plus the headline validation rollout and the success-rate summary.
-
-Run:  python diagnostics.py --model data/koopman_spiral.pkl
-"""
+"""Spectral & dynamical diagnostics for the trained FHN Koopman models."""
 
 import os
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
@@ -36,16 +22,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PLOTS = os.path.join(HERE, "plots")
 A, B, TAU = TH.A_DEFAULT, TH.B_DEFAULT, TH.TAU_DEFAULT
 
-
-# --------------------------------------------------------------------------- #
 def load_model(path):
     with open(path, "rb") as f:
         out = pickle.load(f)
     params = jax.tree_util.tree_map(jnp.asarray, out["params"])
-    cfg = M.ModelConfig(backbone=out["cfg"]["backbone"], m=out["cfg"]["m"])
+    cfg = M.ModelConfig(backbone=out["cfg"]["backbone"], m=out["cfg"]["m"],
+                        radial=out["cfg"].get("radial", "stuart_landau"))
     scales = {k: jnp.asarray(v) for k, v in out["scales"].items()}
     return params, cfg, scales, float(out["dt"]), out
-
 
 def fixed_point_state(u):
     """Return the FHN fixed point (v*, w*) nearest the cycle for control u."""
@@ -55,14 +39,8 @@ def fixed_point_state(u):
     v = fps[np.argsort(np.abs(fps))][0] if len(fps) == 1 else np.sort(fps)[len(fps) // 2]
     return np.array([v, (v + A) / B])
 
-
 def learned_eigs_state(params, cfg, x, u):
-    """Continuous-time (sigma, omega) of the learned operator at state x, control u.
-
-    For spiral: the per-block radius-conditioned values.
-    For bilinear: eigenvalues of A + uB (sigma=Re, omega=|Im|), top-m by Re.
-    Returns sigma (m,), omega (m,) sorted by descending sigma.
-    """
+    """Continuous-time (sigma, omega) of the learned operator at state x, control u."""
     x = jnp.asarray(x, dtype=jnp.float32)[None, :]
     if cfg.backbone == "spiral":
         z = M.encode(params, cfg, x)
@@ -76,8 +54,6 @@ def learned_eigs_state(params, cfg, x, u):
     order = np.argsort(-s)
     return s[order], o[order]
 
-
-# --------------------------------------------------------------------------- #
 def diag_spectrum_vs_jacobian(params, cfg, tag, u_grid=None):
     """D0 / fix #9: learned sigma,omega(u) vs Jacobian mu_pm(u) and cycle freq."""
     if u_grid is None:
@@ -116,7 +92,6 @@ def diag_spectrum_vs_jacobian(params, cfg, tag, u_grid=None):
     p = os.path.join(PLOTS, f"diag_D0_spectrum_{tag}.png")
     fig.savefig(p, dpi=150); plt.close(fig)
 
-    # correlation in the stable regime (where the linearisation is the attractor)
     mask = th["stable"] & np.isfinite(th["sigma"])
     corr = float(np.corrcoef(lead_s[mask], th["sigma"][mask])[0, 1]) if mask.sum() > 2 else float("nan")
     return {"plot": p, "sigma_corr_stable": corr,
@@ -124,8 +99,6 @@ def diag_spectrum_vs_jacobian(params, cfg, tag, u_grid=None):
             "learned_omega": lead_o.tolist(), "jac_sigma": th["sigma"].tolist(),
             "jac_omega": th["omega"].tolist(), "cycle_omega": cyc.tolist()}
 
-
-# --------------------------------------------------------------------------- #
 def diag_eigs_over_radius(params, cfg, tag, u_values=(0.3, 1.0, 1.6), r_max=3.0):
     """D1 / fix #1: how the per-block eigenvalues move as the latent radius grows."""
     rs = np.linspace(0.02, r_max, 60)
@@ -134,13 +107,12 @@ def diag_eigs_over_radius(params, cfg, tag, u_values=(0.3, 1.0, 1.6), r_max=3.0)
     for ax, u in zip(axes, u_values):
         if cfg.backbone == "spiral":
             s, o = M.spiral_eig_grid(params, cfg, jnp.asarray(rs), jnp.full_like(jnp.asarray(rs), u))
-            s, o = np.array(s), np.array(o)               # (len(rs), m)
+            s, o = np.array(s), np.array(o)
             for j in range(cfg.m):
                 sc = ax.scatter(o[:, j], s[:, j], c=rs, cmap="viridis", s=12)
             ax.axhline(0, color="r", lw=0.8, ls="--")
             ax.set_title(f"u = {u}")
             ax.set_xlabel(r"$\omega$"); ax.set_ylabel(r"$\sigma$")
-            # cycle radius estimate: smallest r where dominant sigma crosses ~0
             dom = s.max(axis=1)
             cross = np.where(np.diff(np.sign(dom)))[0]
             info[f"u={u}_sigma_range"] = [float(s.min()), float(s.max())]
@@ -161,17 +133,14 @@ def diag_eigs_over_radius(params, cfg, tag, u_values=(0.3, 1.0, 1.6), r_max=3.0)
     info["plot"] = p
     return info
 
-
-# --------------------------------------------------------------------------- #
 def _true_monodromy(u, period, dt=0.005):
     """Ground-truth state-space monodromy (2x2) along the FHN cycle at control u."""
     n = int(round(period / dt))
     t = jnp.linspace(0.0, period, n + 1)
     ys = np.array(simulate_fhn(jnp.array([-1.0, -0.5]), jnp.linspace(0, 400, 40001),
                                I_type="constant", I_val=u))
-    cyc0 = ys[-(int(period / 0.01)):]            # one period of the settled cycle
+    cyc0 = ys[-(int(period / 0.01)):]
     x0 = cyc0[0]
-    # integrate variational equation Phi' = J(t) Phi with RK4 along the cycle
     Phi = np.eye(2)
     v, w = float(x0[0]), float(x0[1])
     for _ in range(n):
@@ -188,7 +157,6 @@ def _true_monodromy(u, period, dt=0.005):
         w += dt / 6 * (f1[1] + 2 * f2[1] + 2 * f3[1] + f4[1])
         Phi = Phi + dt / 6 * (P1 + 2 * P2 + 2 * P3 + P4)
     return np.linalg.eigvals(Phi), x0
-
 
 def diag_floquet(params, cfg, dt, tag, u=1.0):
     """D2 / fix (b): Floquet multipliers of the recovered cycle vs ground truth."""
@@ -209,7 +177,6 @@ def diag_floquet(params, cfg, dt, tag, u=1.0):
     M_state = np.array(jax.jacobian(state_return)(x0j))
     learn_mult = np.linalg.eigvals(M_state)
 
-    # full latent monodromy: d z_final / d z_0  (square, 2m x 2m)
     z0 = M.encode(params, cfg, x0j[None, :])[0]
 
     def latent_return(z):
@@ -241,52 +208,43 @@ def diag_floquet(params, cfg, dt, tag, u=1.0):
             "learned_state_mult_abs": sorted(np.abs(learn_mult).tolist(), reverse=True),
             "learned_latent_top_abs": lat_top.tolist()}
 
-
-# --------------------------------------------------------------------------- #
 def diag_koopman_modes(params, cfg, dt, tag, u=1.0, n_periods=1.0):
     """D3 / fix (c): per-mode (harmonic) decomposition of the recovered cycle."""
     period, _ = TH.limit_cycle_period(u, A, B, TAU, t_max=400.0, dt=0.01)
     if not np.isfinite(period):
         period = 37.0
-    # settle onto the true cycle, encode, roll the learned operator over ~1 period
     ys = np.array(simulate_fhn(jnp.array([-1.0, -0.5]), jnp.linspace(0, 400, 40001),
                                I_type="constant", I_val=u))
     x0 = jnp.asarray(ys[-int(period / 0.01)], dtype=jnp.float32)
     N = int(round(n_periods * period / dt))
     z0 = M.encode(params, cfg, x0[None, :])
-    z_roll = M.rollout(params, cfg, z0, jnp.full((1, N), u), dt)[0]   # (N, 2m)
-    z_all = np.array(jnp.concatenate([z0, z_roll], axis=0))           # (N+1, 2m)
+    z_roll = M.rollout(params, cfg, z0, jnp.full((1, N), u), dt)[0]
+    z_all = np.array(jnp.concatenate([z0, z_roll], axis=0))
 
-    # per-mode contribution to the decoded state via the (linear) decoder
     if cfg.backbone == "spiral":
-        Dw = np.array(params["dec"]["w"])          # (2m, 2)
+        Dw = np.array(params["dec"]["w"])
         Db = np.array(params["dec"]["b"])
-        contrib = np.einsum("tk,kc->tkc", z_all, Dw)   # (T, 2m, 2)
-        # group into m blocks (mode j = coords 2j,2j+1)
-        block = contrib.reshape(contrib.shape[0], cfg.m, 2, 2).sum(axis=2)  # (T, m, 2)
+        contrib = np.einsum("tk,kc->tkc", z_all, Dw)
+        block = contrib.reshape(contrib.shape[0], cfg.m, 2, 2).sum(axis=2)
         recon = block.sum(axis=1) + Db
-        # native block order (len m), aligned with `block` (mode j = coords 2j,2j+1)
         sg, og = M.spiral_eigs(params, cfg, z0, jnp.array([float(u)]))
         s, o = np.array(sg[0]), np.array(og[0])
     else:
         Amat = np.array(M.bilinear_matrices(params)[0]) + u * np.array(M.bilinear_matrices(params)[1])
         ev, V = np.linalg.eig(Amat)
         Vinv = np.linalg.inv(V)
-        coords = z_all @ Vinv.T                     # modal coordinates (complex)
-        # state contribution of each eigen-mode: Re( coords_j * V[:,j] )[:2]
+        coords = z_all @ Vinv.T
         block = np.zeros((z_all.shape[0], len(ev), 2))
         for j in range(len(ev)):
             mode_state = np.outer(coords[:, j], V[:, j])[:, :2]
             block[:, j, :] = mode_state.real
         recon = block.sum(axis=1)
-        # native order (len 2m), aligned with `block` (mode j = ev[j])
         s, o = ev.real, np.abs(ev.imag)
 
-    # energy per mode (on v) and cumulative reconstruction R^2
-    energy = np.sqrt((block[..., 0] ** 2).mean(axis=0))      # (m,)
+    energy = np.sqrt((block[..., 0] ** 2).mean(axis=0))
     order = np.argsort(-energy)
-    v_ref = block.sum(axis=1)[:, 0]    # bias-free full reconstruction (R^2 reference)
-    v_full = recon[:, 0]               # actual decoded output (for plotting)
+    v_ref = block.sum(axis=1)[:, 0]
+    v_full = recon[:, 0]
     cum = np.zeros(len(order))
     acc = np.zeros(recon.shape[0])
     for i, j in enumerate(order):
@@ -318,12 +276,10 @@ def diag_koopman_modes(params, cfg, dt, tag, u=1.0, n_periods=1.0):
     return {"plot": p, "u": u, "period": float(period),
             "modes_by_energy": table, "cum_R2": cum.tolist()}
 
-
-# --------------------------------------------------------------------------- #
 def diag_longhorizon_bands(params, cfg, dt, scales, data, tag, traj_idx=0):
     """D4 / fix (d): long-horizon rollout error decomposed by spectral band."""
-    ys = jnp.asarray(data["ys_val"][traj_idx])         # (T, 2)
-    u = jnp.asarray(data["u_val"][traj_idx])           # (T,)
+    ys = jnp.asarray(data["ys_val"][traj_idx])
+    u = jnp.asarray(data["u_val"][traj_idx])
     T = ys.shape[0]
     z0 = M.encode(params, cfg, ys[0][None, :])
     z_roll = M.rollout(params, cfg, z0, u[None, :T - 1], dt)[0]
@@ -333,7 +289,6 @@ def diag_longhorizon_bands(params, cfg, dt, scales, data, tag, traj_idx=0):
     t = np.arange(T) * dt
     err = np.linalg.norm((x_pred - x_true) / np.array(scales["x"]), axis=1)
 
-    # spectral-band energy of the residual via FFT of v-error
     ve = x_pred[:, 0] - x_true[:, 0]
     freqs = np.fft.rfftfreq(T, d=dt)
     pe = np.abs(np.fft.rfft(ve)) ** 2
@@ -369,8 +324,6 @@ def diag_longhorizon_bands(params, cfg, dt, scales, data, tag, traj_idx=0):
             "band_residual_fraction": {n: band_err[n] / tot for n in names},
             "band_true_power": band_true}
 
-
-# --------------------------------------------------------------------------- #
 def _rollout_metrics(params, cfg, dt, scales, ys, u, threshold=0.30):
     """Free-running rollout metrics for a batch of trajectories (no plotting)."""
     ys = jnp.asarray(ys); u = jnp.asarray(u)
@@ -397,7 +350,7 @@ def _rollout_metrics(params, cfg, dt, scales, ys, u, threshold=0.30):
         sig = sig - sig.mean()
         ps = np.abs(np.fft.rfft(sig)) ** 2
         fr = np.fft.rfftfreq(len(sig), d=dt)
-        k = 1 + int(np.argmax(ps[1:]))                 # skip DC
+        k = 1 + int(np.argmax(ps[1:]))
         return fr[k], (sig.max() - sig.min())
     spec_ok = np.zeros(Bn, dtype=bool)
     for i in range(Bn):
@@ -411,7 +364,6 @@ def _rollout_metrics(params, cfg, dt, scales, ys, u, threshold=0.30):
             "spectral": float(spec_ok.mean()),
             "cheb": float(np.max(np.abs(x_pred[..., 0] - x_true[..., 0]), axis=1).mean())}
 
-
 def _indist_sine_set(dt, n=16, t_max=80.0, seed=777):
     """Fresh in-distribution validation set: sine forcing, new ICs & amplitudes."""
     t = jnp.linspace(0.0, t_max, int(round(t_max / dt)) + 1)
@@ -423,13 +375,8 @@ def _indist_sine_set(dt, n=16, t_max=80.0, seed=777):
     u = jax.vmap(lambda iv: get_external_current(t, 'sine', iv))(I)
     return ys, u
 
-
 def success_rate(params, cfg, dt, scales, data, tag, threshold=0.30):
-    """Free-running rollout success on two held-out sets:
-       in-distribution (sine forcing, new ICs/amplitudes) and
-       out-of-distribution (the unseen chirp forcing from the dataset).
-    Reports horizon-resolved error, valid time, and pointwise + spectral success.
-    """
+    """Free-running rollout success on two held-out sets: in-distribution (sine forcing, new ICs/amplitudes) and out-of-distribution (the unseen chirp for..."""
     period = 37.0
     m_ood = _rollout_metrics(params, cfg, dt, scales, data["ys_val"], data["u_val"], threshold)
     ys_id, u_id = _indist_sine_set(dt)
@@ -463,12 +410,9 @@ def success_rate(params, cfg, dt, scales, data, tag, threshold=0.30):
 
     return {"plot": p, "threshold": threshold,
             "in_distribution_sine": pack(m_id), "out_of_distribution_chirp": pack(m_ood),
-            # convenience top-level (OOD, the harder test) for backwards-compat
             "spectral_success": m_ood["spectral"], "success_rate": m_ood["succ_full"],
             "success_rate_1period": m_ood["succ_1p"]}
 
-
-# --------------------------------------------------------------------------- #
 def run_all(model_path, data_path=None):
     data_path = data_path or os.path.join(HERE, "data", "fhn_koopman_t80.npz")
     params, cfg, scales, dt, out = load_model(model_path)
@@ -496,14 +440,12 @@ def run_all(model_path, data_path=None):
     print(f"  saved data/diag_{tag}.json")
     return results
 
-
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", default=os.path.join(HERE, "data", "koopman_spiral.pkl"))
     p.add_argument("--data", default=None)
     args = p.parse_args()
     run_all(args.model, args.data)
-
 
 if __name__ == "__main__":
     main()

@@ -1,46 +1,13 @@
-"""
-Ground-truth spectral theory for the FitzHugh-Nagumo (FHN) system.
-
-For a *constant* control u the FHN system
-
-    v_dot = v - v^3/3 - w + u
-    w_dot = (v + a - b w) / tau
-
-has fixed points where both velocities vanish.  Linearising about a fixed point
-v* gives the Jacobian
-
-    J = [[1 - v*^2 , -1     ],
-         [ 1/tau    , -b/tau ]]
-
-whose eigenvalues are
-
-    mu_pm = T/2 +- sqrt( (T/2)^2 - D ),   T = tr J,  D = det J.
-
-When (T/2)^2 < D the eigenvalues are a complex-conjugate pair
-mu = sigma +- i*omega with
-
-    sigma = T/2,   omega = sqrt(D - (T/2)^2).
-
-This module provides those ground-truth quantities so the learned Koopman
-spectrum can be checked against them (fix #9).  It also measures the limit-cycle
-period (hence frequency) by direct simulation, because in the oscillatory regime
-the *global* attractor is a limit cycle whose neutral Koopman mode does NOT
-coincide with the unstable focus eigenvalue.
-"""
+"""Ground-truth spectral theory for the FitzHugh-Nagumo (FHN) system."""
 
 import numpy as np
 
 A_DEFAULT, B_DEFAULT, TAU_DEFAULT = 0.7, 0.8, 12.5
 
-
 def fixed_points(u, a=A_DEFAULT, b=B_DEFAULT):
-    """Real fixed-point membrane potentials v* for constant control u.
-
-    Solves (1/3) v^3 + (1/b - 1) v + (a/b - u) = 0.
-    """
+    """Real fixed-point membrane potentials v* for constant control u."""
     roots = np.roots([1.0 / 3.0, 0.0, (1.0 / b - 1.0), (a / b - u)])
     return roots[np.abs(roots.imag) < 1e-7].real
-
 
 def jacobian_eigs_at(v_star, a=A_DEFAULT, b=B_DEFAULT, tau=TAU_DEFAULT):
     """Eigenvalues (complex) of the FHN Jacobian at membrane potential v_star."""
@@ -50,24 +17,14 @@ def jacobian_eigs_at(v_star, a=A_DEFAULT, b=B_DEFAULT, tau=TAU_DEFAULT):
     sq = np.sqrt(complex(disc))
     return np.array([T / 2.0 + sq, T / 2.0 - sq])
 
-
 def classify(v_star, a=A_DEFAULT, b=B_DEFAULT, tau=TAU_DEFAULT):
     """Return 'stable' or 'unstable' for the fixed point at v_star."""
     T = (1.0 - v_star ** 2) - b / tau
     D = -(b / tau) * (1.0 - v_star ** 2) + 1.0 / tau
     return "stable" if (D > 0 and T < 0) else "unstable"
 
-
 def spectrum_over_u(u_grid, a=A_DEFAULT, b=B_DEFAULT, tau=TAU_DEFAULT):
-    """Leading Jacobian eigenvalue (largest real part) over a grid of controls.
-
-    Returns a dict of arrays aligned with u_grid:
-        sigma   : real part of the leading eigenvalue at the (lowest-|v*|) fixed point
-        omega   : |imag part| of that eigenvalue (0 if real)
-        v_star  : the chosen fixed point
-        stable  : bool, whether that fixed point is stable
-        n_fp    : number of real fixed points
-    """
+    """Leading Jacobian eigenvalue (largest real part) over a grid of controls."""
     u_grid = np.asarray(u_grid, dtype=float)
     sig = np.full_like(u_grid, np.nan)
     om = np.full_like(u_grid, np.nan)
@@ -79,8 +36,6 @@ def spectrum_over_u(u_grid, a=A_DEFAULT, b=B_DEFAULT, tau=TAU_DEFAULT):
         nfp[i] = len(fps)
         if len(fps) == 0:
             continue
-        # For a single fixed point (the generic oscillatory/excitable case) take it;
-        # otherwise take the middle (typically unstable) branch.
         v_star = fps[np.argsort(np.abs(fps))][0] if len(fps) == 1 else np.sort(fps)[len(fps) // 2]
         eigs = jacobian_eigs_at(v_star, a, b, tau)
         lead = eigs[np.argmax(eigs.real)]
@@ -89,15 +44,9 @@ def spectrum_over_u(u_grid, a=A_DEFAULT, b=B_DEFAULT, tau=TAU_DEFAULT):
     return {"u": u_grid, "sigma": sig, "omega": om, "v_star": vs,
             "stable": stab, "n_fp": nfp}
 
-
 def limit_cycle_period(u, a=A_DEFAULT, b=B_DEFAULT, tau=TAU_DEFAULT,
                        t_max=400.0, dt=0.01, transient=0.5):
-    """Measure the limit-cycle period at constant control u by direct simulation.
-
-    Returns (period, amplitude) or (nan, amplitude) if no oscillation is found.
-    Uses a simple RK4 integrator (numpy) and up-crossing detection of v about its
-    own mean after discarding a transient fraction.
-    """
+    """Measure the limit-cycle period at constant control u by direct simulation."""
     n = int(t_max / dt) + 1
     v, w = -1.0, -0.5
     vs = np.empty(n)
@@ -120,7 +69,6 @@ def limit_cycle_period(u, a=A_DEFAULT, b=B_DEFAULT, tau=TAU_DEFAULT,
         return float(np.mean(np.diff(up)) * dt), float(amp)
     return float("nan"), float(amp)
 
-
 def cycle_frequency_over_u(u_grid, **kw):
     """Angular frequency omega = 2*pi/period of the limit cycle over u (nan if none)."""
     out = []
@@ -128,7 +76,6 @@ def cycle_frequency_over_u(u_grid, **kw):
         per, _ = limit_cycle_period(u, **kw)
         out.append(2.0 * np.pi / per if np.isfinite(per) else np.nan)
     return np.array(out)
-
 
 if __name__ == "__main__":
     ug = np.linspace(0.0, 1.6, 17)

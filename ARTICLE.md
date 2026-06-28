@@ -223,13 +223,55 @@ The resolution has two parts, and both are central to our design:
    onto a neutral circle" in latent space. The nonlinearity lives in the
    coordinate change; the *evolution* stays linear.
 
-This is why our stability constraint `σ ≤ 0` (fix #2) is not in conflict with
-representing a limit cycle: the cycle wants `σ = 0` (neutral), which `σ ≤ 0`
-permits, and strict stability everywhere else is exactly what stops long rollouts
-from exploding. The trade-off — `σ ≤ 0` can attract onto the cycle but cannot
-*pump energy back* if the orbit is nudged inward — is real, and we measure its
-consequence directly (the recovered cycle slowly loses amplitude over many
-periods; see the Floquet diagnostic D2 and Section 11).
+For a while we believed the constraint `σ ≤ 0` (the original fix #2) was harmless:
+the cycle "wants `σ = 0` (neutral)", which `σ ≤ 0` permits, and strict stability
+everywhere else stops long rollouts from exploding. **That reasoning was wrong,
+and it was the cause of every long-horizon failure.** A neutral cycle (`σ = 0`) is
+*marginal*, not *attracting*: nothing pulls a perturbed orbit back to it. Two fatal
+consequences follow. (i) `σ = 0` is unreachable for `σ = −softplus(·)` except in
+the limit `raw → −∞` (vanishing gradient), so in practice `σ` settles at a small
+*negative* value and the orbit **decays to 0** over a long rollout. (ii) With no
+radial attractor the cycle amplitude is whatever the encoder happened to emit — it
+cannot migrate to the correct amplitude for an unseen current, so out-of-sample
+generalisation collapses. Empirically both happened: the success rate on
+free-running rollouts was **0%**.
+
+#### The fix: a Stuart–Landau (Hopf normal-form) radial law
+
+The cure is to let the latent radius obey the *real* normal form of the
+bifurcation FHN itself undergoes — a supercritical Hopf — rather than a clamped
+linear rate. Per complex mode `j`,
+
+```
+   ṙ_j = σ0_j(u) · r_j − β_j(u) · r_j³ ,      θ̇_j = ω_j(r_j, u)
+```
+
+with `σ0` **signed** (a hypernetwork output, free to be positive) and
+`β = softplus(·) + β_min > 0`. This single change resolves the obstruction:
+
+* **It is attracting, not neutral.** For `σ0 > 0` (a firing neuron) there is a
+  *stable* limit cycle at `r* = √(σ0/β)`: `ṙ > 0` inside it and `ṙ < 0` outside, so
+  the orbit is pulled onto `r*` from both sides — the model now *pumps energy back*
+  when nudged inward, exactly the property `σ ≤ 0` could never provide.
+* **It still cannot diverge.** The cubic term gives a global absorbing ball
+  (`ṙ < 0` for all large `r`), so rollouts stay bounded at any horizon — we
+  integrate the radius with the *exact* logistic flow, so this holds for any `dt`
+  and any number of steps, not just asymptotically.
+* **Amplitude becomes a learned function of the current.** `r*(u)` (hence the
+  decoded spike amplitude) is set by the operator, so the model reproduces the
+  amplitude of cycles it never trained on and can be *inverted* to ask which `u`
+  produces a desired amplitude — the basis for intervention design.
+* **It subsumes the old design.** Setting `β → 0`, `σ0 = −softplus(·)` recovers the
+  legacy clamped law (kept as `radial="clamped"` for ablation).
+
+The nonlinear-encoder argument (point 2 above) still helps — it warps the basin so
+the latent geometry is clean — but it is no longer asked to do the impossible job
+of manufacturing an attractor out of a marginal one. The radial nonlinearity now
+lives, correctly, in the *evolution* (`model.py::spiral_sl_coeffs`,
+`_sl_radius_step`); the angular evolution stays linear, preserving the spectral
+interpretation. Long-horizon amplitude no longer bleeds away (contrast the legacy
+Floquet diagnostic D2 in Section 11; see `stability_eval.py` for the many-period
+amplitude trace).
 
 ---
 
@@ -284,12 +326,16 @@ design choices make this work for FHN:
   Section 2.3 — the thing a `u`-only model structurally cannot do. This *is* the
   Stuart–Landau normal form of a Hopf oscillator (`\dot r = σ(r)r`, `\dot θ = ω(r)`),
   learned rather than derived.
-* **Stability by construction (fix #2).** We never let a mode grow:
-  `σ_j = -\text{softplus}(\cdot) \le 0`. Softplus can approach `0` from below
-  arbitrarily closely, so a neutral cycle mode (`σ ≈ 0`) is representable, while
-  every discrete step has multiplier `e^{σ dt} \le 1` — rollouts are
-  *non-expansive* and cannot diverge no matter how long you run them (we prove
-  this empirically in `test_long_rollout_is_bounded`).
+* **Boundedness *and* an attractor (revised fix #2).** The radial law is the
+  Stuart–Landau form `ṙ_j = σ0_j(u) r_j − β_j(u) r_j³` with `β > 0` (see §3.4).
+  The cubic term gives a global absorbing ball (rollouts cannot diverge at any
+  horizon), while `σ0` is left *signed* so a firing mode has a genuinely
+  *attracting* cycle at `r* = √(σ0/β)` instead of a marginal neutral one — fixing
+  the long-horizon amplitude decay of the old `σ ≤ 0` clamp. We integrate the
+  radius with the exact logistic flow, so the bound is unconditional in `dt` and
+  horizon (`test_long_rollout_is_bounded`,
+  `test_spiral_sl_is_attracting_from_inside_and_outside`). The legacy
+  non-expansive `σ = −softplus(·) ≤ 0` law remains available as `radial="clamped"`.
 
 The decoder for this backbone is **linear**, `x̂ = D z`. This is the de-risking
 spirit of fix #8: a nonlinear decoder compounds error during a long rollout and
@@ -388,9 +434,9 @@ forced the two-backbone split of Section 5.
 | # | Problem (as diagnosed) | What we implemented | Where |
 |---|---|---|---|
 | 1 | **Operator conditioning** — eigenvalues depended only on `u`, so the amplitude-dependent cycle frequency was unreachable. | Hypernetwork reads the block radius `r=‖z_j‖` as well as `u`: `σ(r,u), ω(r,u)`. | `model.py::spiral_eigs` |
-| 2 | **Stability** — `σ` was unconstrained, so `e^{σ dt}>1` made long rollouts diverge. | `σ = −softplus(·) ≤ 0` (spiral); negative-semi-definite symmetric part of `A+uB` (bilinear). | `model.py` |
+| 2 | **Stability** — `σ` unconstrained → `e^{σ dt}>1` diverged; *then* the over-correction `σ = −softplus(·) ≤ 0` made the cycle marginal, so it decayed to 0 and never locked the right amplitude (0% success). | **Stuart–Landau radial law** `ṙ = σ0(u) r − β(u) r³`, `β>0`: signed `σ0` gives an *attracting* cycle at `r*=√(σ0/β)`; cubic gives a global absorbing ball; exact logistic step ⇒ bounded at any horizon. | `model.py::spiral_sl_coeffs`, `_sl_radius_step` |
 | 3 | **Encoder collapse** — `w_rec=0` for the first 1000 steps gave the decoder no gradient, so `z≡0` was optimal. | `w_rec=1` from step 0. | `train.py` |
-| 4 | **Horizon** — trained on `t_max=1`, validated on `10`, both sub-period (period ≈ 37). | `t_max=80` (≈2 periods); `n_predict` grows on a curriculum 40→100→200. | `data_gen.py`, `train.py` |
+| 4 | **Horizon** — trained on `t_max=1`, validated on `10`, both sub-period (period ≈ 37); even after a first pass the curriculum topped out at 200 steps ≈ 0.27 period while success is judged on 2 periods. | `t_max=100` (≈2.7 periods); diverse current mix; `n_predict` curriculum grows to a **full cycle** (~780 steps), with gradient-checkpointed rollout + sequential windows to fit GPU memory. | `data_gen.py`, `train.py`, `model.py` |
 | 5 | **Loss** — `L₆` over-weighted spikes and floored precision; state and derivative summed at different scales. | MSE/Huber; separately-weighted Sobolev; per-dimension normalisation of state and derivative. | `model.py::compute_losses` |
 | 6 | **Compute** — hypernetwork recomputed every step; ~150 duplicated lines across two files; diffrax unused. | One shared `model.py`; vectorised hypernetwork; diffrax wired in as the high-accuracy reference solver. | `model.py`, `simulation.py` |
 | 7 | **Backbone** — black-box `u→λ` MLP discards FHN's control-affine structure and forbids mode mixing. | Implemented the bilinear generator `ż=(A+uB)z` as a full alternative backbone. | `model.py` (`bilinear`) |

@@ -1,10 +1,4 @@
-"""Warm-start a trained Koopman model and push the prediction horizon out to ~full
-trajectory length, so the model learns to sustain the limit cycle over many spikes
-(the part the short initial curriculum could not reach).
-
-Loads data/koopman_<backbone>.pkl, continues training on the (mixed sine+constant)
-dataset with a long-horizon curriculum, and overwrites the pickle.
-"""
+"""Warm-start a trained Koopman model and push the prediction horizon out to ~full trajectory length, so the model learns to sustain the limit cycle o..."""
 import os, pickle, time, argparse
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 import numpy as np
@@ -13,7 +7,6 @@ import model as M
 from data_gen import fhn_derivatives
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-
 
 def finetune(path, stages, lr=5e-4, batch=40):
     with open(path, "rb") as f:
@@ -46,7 +39,7 @@ def finetune(path, stages, lr=5e-4, batch=40):
     def make(npred, stride):
         def loss(p):
             lr_, ll, lp = M.compute_losses(p, cfg, ys, dots, u, dt, npred, stride, sc, "mse", 0.1)
-            return 1.0 * lr_ + 1.0 * ll + 1.5 * lp        # emphasise the rollout
+            return 1.0 * lr_ + 1.0 * ll + 1.5 * lp
         @jax.jit
         def step(p, s):
             v, g = jax.value_and_grad(loss)(p)
@@ -67,7 +60,6 @@ def finetune(path, stages, lr=5e-4, batch=40):
         pickle.dump(out, f)
     print(f"[{cfg.backbone}] saved {path}", flush=True)
 
-
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--backbone", default="spiral")
@@ -77,9 +69,8 @@ def main():
         stages = [(200, 100, 150), (600, 300, 150), (1300, 1300, 200)]
         finetune(path, stages, lr=5e-4, batch=40)
     else:
-        stages = [(200, 100, 120), (500, 250, 120)]   # expm step is costly
+        stages = [(200, 100, 120), (500, 250, 120)]
         finetune(path, stages, lr=5e-4, batch=32)
-
 
 if __name__ == "__main__":
     main()
