@@ -2,7 +2,6 @@
 import os
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 import functools
-import numpy as np
 import jax
 import jax.numpy as jnp
 import optax

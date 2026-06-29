@@ -4,13 +4,10 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 import argparse
 import json
 import numpy as np
-import jax
 import jax.numpy as jnp
 
-import model as M
 from intervention import load_model, rollout_states
 from simulation import simulate_fhn_batch
-from fhn_theory import limit_cycle_period
 
 PERIOD = 37.0
 

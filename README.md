@@ -7,21 +7,15 @@ a stimulus-driven neuron can be predicted by a linear operator whose spectrum is
 conditioned on the input current.
 
 The full theory (from "what is a neuron model" up to Koopman spectral theory and
-Floquet analysis) and all results are in **[`ARTICLE.md`](ARTICLE.md)**. A
-**beginner-friendly, figure-rich walkthrough of the whole architecture** (FHN →
-Hopf → why linear Koopman fails → the Stuart–Landau fix → SINDyc → inverse control)
-is in **[`TUTORIAL.md`](TUTORIAL.md)**. This README is the quick map.
+Floquet analysis) and all results are in **[`ARTICLE.md`](ARTICLE.md)**. This
+README is the quick map.
 
-> **Two model routes (see `TUTORIAL.md`):**
-> 1. **Stuart–Landau Koopman** (`model.py`, `train.py`) — latent radius obeys the Hopf
->    normal form `ṙ = σ₀(u)r − β(u)r³`, so the limit cycle is an *attractor*: bounded
->    and non-collapsing **by construction** over any horizon. Verified stable for 25+
->    periods. Best when stability must be guaranteed or only `v` is observed.
-> 2. **SINDyc** (`sindyc.py`, `fit_sindyc.py`) — discovers FHN's cubic ODE by sparse
->    regression in **~2 s on CPU**; **100%** out-of-distribution rollout success,
->    **closed-form** current inversion. The recommended fast, accurate route.
-> Inverse design / intervention: `intervention.py`. Long-horizon check:
-> `stability_eval.py`. Reproduce the tutorial figures: `make_article_figures.py`.
+> **Stuart–Landau Koopman** (`model.py`, `train.py`) — the latent radius obeys the
+> Hopf normal form `ṙ = σ₀(u)r − β(u)r³`, so the limit cycle is an *attractor*:
+> bounded and non-collapsing **by construction** over any horizon (verified for 25+
+> periods, `stability_eval.py`). Inverse design / intervention: `intervention.py`.
+> An amortized, non-recursive operator surrogate `G(x₀, I_ext(·), t) → x(t)` is in
+> progress (`operator_data.py` builds its dataset).
 
 ---
 

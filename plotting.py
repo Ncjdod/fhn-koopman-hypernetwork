@@ -1,4 +1,3 @@
-import numpy as np
 import matplotlib.pyplot as plt
 
 def plot_results(t_span, ys, a, b, tau, I_type, I_val, u_data=None, fitted_data=None, noisy_target=None, save_path=None, show_plot=True):

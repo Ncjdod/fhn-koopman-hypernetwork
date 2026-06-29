@@ -16,7 +16,6 @@ import model as M
 import fhn_theory as TH
 from dynamics import get_external_current
 from simulation import simulate_fhn, simulate_fhn_batch
-from data_gen import fhn_derivatives
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLOTS = os.path.join(HERE, "plots")
